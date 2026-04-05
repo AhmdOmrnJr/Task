@@ -141,7 +141,6 @@ export class Campaign implements ICampaign {
       const result = await this.callHandler(task.phoneNumber);
       this.activeCalls--;
       
-      // Convert ms to minutes for daily tracking
       const callMinutes = result.durationMs / 60000;
       this.dailyMinutesUsed += callMinutes;
 
@@ -151,12 +150,10 @@ export class Campaign implements ICampaign {
         this.handleFailure(task);
       }
     } catch (error) {
-      // If the handler throws an unexpected error, treat it as a failed call
       this.activeCalls--;
       this.handleFailure(task);
     }
 
-    // The state changed, trigger the pump
     this.tryDispatch();
   }
 
