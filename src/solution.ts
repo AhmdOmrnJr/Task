@@ -46,6 +46,50 @@ export class Campaign implements ICampaign {
     this.tryDispatch();
   }
 
+  public pause(): void {
+    if (this.state !== "running") return;
+    this.state = "paused";
+    
+    if (this.wakeupTimerId !== null) {
+      this.clock.clearTimeout(this.wakeupTimerId);
+      this.wakeupTimerId = null;
+    }
+    for (const retry of this.scheduledRetries) {
+      if (retry.timerId !== null) {
+        this.clock.clearTimeout(retry.timerId);
+        retry.timerId = null;
+      }
+    }
+  }
+
+  public resume(): void {
+    if (this.state !== "paused") return;
+    this.state = "running";
+    
+    const now = this.clock.now();
+    const remainingRetries = [];
+    
+    for (const retry of this.scheduledRetries) {
+      if (retry.executeAt <= now) {
+        this.enqueueRetry(retry.task);
+      } else {
+        retry.timerId = this.clock.setTimeout(() => {
+          const idx = this.scheduledRetries.indexOf(retry);
+          if (idx !== -1) this.scheduledRetries.splice(idx, 1);
+          this.enqueueRetry(retry.task);
+        }, retry.executeAt - now);
+        remainingRetries.push(retry);
+      }
+    }
+    this.scheduledRetries = remainingRetries;
+    this.tryDispatch();
+  }
+
+  private enqueueRetry(task: QueueItem): void {
+    this.pendingRetries--;
+    this.queue.unshift(task);
+    this.tryDispatch();
+  }
 
   public getStatus(): CampaignStatus {
     return {
@@ -57,6 +101,7 @@ export class Campaign implements ICampaign {
       dailyMinutesUsed: this.dailyMinutesUsed,
     };
   };
+
   /**
    * The core engine. Evaluates state and constraints, and initiates calls if allowed.
    */
@@ -113,6 +158,29 @@ export class Campaign implements ICampaign {
 
     // The state changed, trigger the pump
     this.tryDispatch();
+  }
+
+  private handleFailure(task: QueueItem): void {
+    const maxRetries = this.config.maxRetries ?? 2;
+    const retryDelayMs = this.config.retryDelayMs ?? 3600000;
+
+    if (task.attempts < maxRetries) {
+      this.pendingRetries++;
+      task.attempts++;
+
+      const executeAt = this.clock.now() + retryDelayMs;
+      const retryRecord = { task, executeAt, timerId: null as number | null };
+      
+      retryRecord.timerId = this.clock.setTimeout(() => {
+        const idx = this.scheduledRetries.indexOf(retryRecord);
+        if (idx !== -1) this.scheduledRetries.splice(idx, 1);
+        this.enqueueRetry(retryRecord.task);
+      }, retryDelayMs);
+      
+      this.scheduledRetries.push(retryRecord);
+    } else {
+      this.totalFailed++;
+    }
   }
 
   // --- Time & Timezone Utilities ---
