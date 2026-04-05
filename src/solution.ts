@@ -40,6 +40,13 @@ export class Campaign implements ICampaign {
     }));
   }
 
+  public start(): void {
+    if (this.state === "running" || this.state === "completed") return;
+    this.state = "running";
+    this.tryDispatch();
+  }
+
+
   public getStatus(): CampaignStatus {
     return {
       state: this.state,
@@ -50,6 +57,63 @@ export class Campaign implements ICampaign {
       dailyMinutesUsed: this.dailyMinutesUsed,
     };
   };
+  /**
+   * The core engine. Evaluates state and constraints, and initiates calls if allowed.
+   */
+  private tryDispatch(): void {
+    if (this.state !== "running") return;
+
+    this.checkAndResetDailyQuota();
+
+    if (this.queue.length === 0 && this.activeCalls === 0 && this.pendingRetries === 0) {
+      this.state = "completed";
+      return;
+    }
+    if (this.activeCalls >= this.config.maxConcurrentCalls) return;
+
+    if (this.dailyMinutesUsed >= this.config.maxDailyMinutes) {
+      this.scheduleWakeUp(this.getMsUntilNextMidnight());
+      return;
+    }
+
+    if (!this.isWithinWorkingHours()) {
+      this.scheduleWakeUp(this.getMsUntilNextStartWindow());
+      return;
+    }
+
+    const task = this.queue.shift();
+    if (!task) return;
+
+    this.executeCall(task);
+
+    this.tryDispatch();
+  }
+
+  private async executeCall(task: QueueItem): Promise<void> {
+    this.activeCalls++;
+
+    try {
+      const result = await this.callHandler(task.phoneNumber);
+      this.activeCalls--;
+      
+      // Convert ms to minutes for daily tracking
+      const callMinutes = result.durationMs / 60000;
+      this.dailyMinutesUsed += callMinutes;
+
+      if (result.answered) {
+        this.totalProcessed++;
+      } else {
+        this.handleFailure(task);
+      }
+    } catch (error) {
+      // If the handler throws an unexpected error, treat it as a failed call
+      this.activeCalls--;
+      this.handleFailure(task);
+    }
+
+    // The state changed, trigger the pump
+    this.tryDispatch();
+  }
 
   // --- Time & Timezone Utilities ---
 
@@ -103,3 +167,13 @@ export class Campaign implements ICampaign {
     const nextMidnight = now.startOf("day").plus({ days: 1 });
     return nextMidnight.toMillis() - now.toMillis();
   }
+
+  private scheduleWakeUp(delayMs: number): void {
+    if (this.wakeupTimerId !== null) return; 
+
+    this.wakeupTimerId = this.clock.setTimeout(() => {
+      this.wakeupTimerId = null;
+      this.tryDispatch();
+    }, delayMs);
+  }
+}
